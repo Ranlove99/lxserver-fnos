@@ -1,0 +1,19 @@
+# 忽略依赖与构建产物（源码与工程文件入库，运行时二进制不入库）
+node_modules/
+src/server/
+build-x64/app/
+build-arm/app/
+out/
+*.fpk
+*.log
+data/
+logs/
+shots/
+.DS_Store
+*.bak-*
+config.js.bak-*
+
+# 临时凭据（严禁入库）
+.ghpat
+*.pat
+.env

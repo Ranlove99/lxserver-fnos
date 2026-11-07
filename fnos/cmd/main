@@ -1,0 +1,318 @@
+#!/bin/bash
+# ============================================================
+# LX Music Web / 同步服务 运行控制
+# 用法: main start|stop|status
+# ============================================================
+set -u
+
+APP_NAME="lxserver"
+APP_DIR="${TRIM_APPDEST:-/var/apps/${APP_NAME}/target}"
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/${APP_NAME}/var}"
+ETC_DIR="${TRIM_PKGETC:-/var/apps/${APP_NAME}/etc}"
+
+DATA_DIR="${VAR_DIR}/data"
+LOG_DIR="${VAR_DIR}/logs"
+PID_FILE="${VAR_DIR}/app.pid"
+LOG_FILE="${VAR_DIR}/app.log"
+ENV_FILE="${ETC_DIR}/app.env"
+NODE_BIN="${APP_DIR}/node/bin/node"
+# 统一网关：飞牛把 /app/<appname>/... 转发到该 socket，页面与桌面同源
+GW_JS="${APP_DIR}/gateway.js"
+SOCK_FILE="${APP_DIR}/app.sock"
+GW_PID_FILE="${VAR_DIR}/gateway.pid"
+GW_PREFIX="/app/${APP_NAME}"
+READY_TIMEOUT=90
+MAX_LOG_SIZE=$((10 * 1024 * 1024))
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+fail() {
+  echo "$1" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+  log_msg "ERROR: $1"
+  exit 1
+}
+
+# 安装向导写入的端口，缺省 9527
+load_port() {
+  local p=""
+  if [ -f "$ENV_FILE" ]; then
+    p="$(sed -n 's/^PORT=//p' "$ENV_FILE" | head -n 1 | tr -d ' \t\r\n')"
+  fi
+  case "$p" in
+    ''|*[!0-9]*) p=9527 ;;
+  esac
+  echo "$p"
+}
+
+port_in_use() {
+  local port="$1"
+  (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && { exec 3>&-; return 0; }
+  return 1
+}
+
+pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# pid 防复用：cwd 必须是 APP_DIR 且命令行含 index.js
+proc_is_app() {
+  local pid="$1"
+  pid_alive "$pid" || return 1
+  local cwd
+  cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
+  [ "$cwd" = "$(readlink -f "$APP_DIR" 2>/dev/null || echo "$APP_DIR")" ] || return 1
+  tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q "index.js" || return 1
+  return 0
+}
+
+status_app() {
+  local pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    proc_is_app "$pid" && return 0
+    rm -f "$PID_FILE"
+  fi
+  # pid 文件缺失或写进去的不是真正的 node 进程时（fork 与 exec 之间存在时间差），
+  # 按「工作目录 + 命令行」反查已运行的实例，避免把运行中的服务误判为未启动、
+  # 进而在端口检查处报「端口已被占用」。
+  pid="$(find_app_pid)" || return 1
+  echo "$pid" > "$PID_FILE"
+  return 0
+}
+
+# 按 APP_DIR 反查正在运行的 index.js 进程 pid
+find_app_pid() {
+  local p cwd want
+  want="$(readlink -f "$APP_DIR" 2>/dev/null || echo "$APP_DIR")"
+  for p in /proc/[0-9]*; do
+    p="${p#/proc/}"
+    [ -r "/proc/${p}/cmdline" ] || continue
+    tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null | grep -q "index.js" || continue
+    cwd="$(readlink -f "/proc/${p}/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$want" ] || continue
+    echo "$p"
+    return 0
+  done
+  return 1
+}
+
+# 旧实例判定：命令行是 node + index.js 即可。
+# 卸载重装时旧进程的 cwd 目录可能已不存在，不能再依赖路径比对。
+proc_is_legacy_app() {
+  local pid="$1" cmd
+  pid_alive "$pid" || return 1
+  cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  case "$cmd" in
+    *node*index.js*) return 0 ;;
+  esac
+  return 1
+}
+
+# 查出监听指定端口的进程 pid
+port_pid() {
+  local port="$1" pid=""
+  if command -v ss >/dev/null 2>&1; then
+    pid="$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ (p "$")' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  fi
+  if [ -z "$pid" ] && command -v fuser >/dev/null 2>&1; then
+    pid="$(fuser -n tcp "$port" 2>/dev/null | tr -s ' ' '\n' | sed '/^[[:space:]]*$/d' | head -n 1)"
+  fi
+  echo "$pid"
+}
+
+gw_alive() {
+  [ -f "$GW_PID_FILE" ] || return 1
+  local pid
+  pid="$(head -n 1 "$GW_PID_FILE" | tr -d '[:space:]')"
+  pid_alive "$pid" || return 1
+  tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q "gateway.js" || return 1
+  return 0
+}
+
+# 统一网关 socket：页面经飞牛域名/HTTPS 访问，避免混合内容导致白屏
+start_gateway() {
+  local PORT="$1"
+  gw_alive && return 0
+  if [ ! -f "$GW_JS" ]; then
+    log_msg "WARN: gateway.js 缺失，桌面入口可能无法打开"
+    return 0
+  fi
+  [ -e "$SOCK_FILE" ] && rm -f "$SOCK_FILE" 2>/dev/null
+
+  (
+    cd "$APP_DIR" || exit 1
+    export GATEWAY_SOCK="$SOCK_FILE"
+    export GATEWAY_PREFIX="$GW_PREFIX"
+    export PORT="$PORT"
+    exec nohup "$NODE_BIN" "$GW_JS" >> "$LOG_FILE" 2>&1
+  ) &
+  echo "$!" > "$GW_PID_FILE"
+
+  local i=0
+  while [ "$i" -lt 20 ]; do
+    [ -S "$SOCK_FILE" ] && { log_msg "Gateway ready: ${SOCK_FILE} -> 127.0.0.1:${PORT}"; return 0; }
+    gw_alive || break
+    i=$((i + 1))
+    sleep 1
+  done
+  log_msg "WARN: 网关 socket 未就绪（不影响直连端口 ${PORT}）"
+  return 0
+}
+
+stop_gateway() {
+  [ -f "$GW_PID_FILE" ] || return 0
+  local pid
+  pid="$(head -n 1 "$GW_PID_FILE" | tr -d '[:space:]')"
+  if pid_alive "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    local n=0
+    while pid_alive "$pid" && [ "$n" -lt 8 ]; do
+      sleep 1
+      n=$((n + 1))
+    done
+    pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$GW_PID_FILE" "$SOCK_FILE" 2>/dev/null
+  return 0
+}
+
+start_app() {
+  if status_app; then
+    start_gateway "$(load_port)"
+    return 0
+  fi
+  [ -x "$NODE_BIN" ] || fail "内置 Node 运行时缺失：${NODE_BIN}，安装包可能损坏"
+  [ -f "${APP_DIR}/index.js" ] || fail "应用文件不完整：index.js 缺失"
+  [ -d "${APP_DIR}/server" ] || fail "应用文件不完整：server/ 缺失"
+  [ -d "${APP_DIR}/public" ] || fail "应用文件不完整：public/ 缺失"
+  [ -d "${APP_DIR}/node_modules/sharp" ] || fail "应用依赖缺失：node_modules/sharp"
+
+  local PORT
+  PORT="$(load_port)"
+
+  if port_in_use "$PORT"; then
+    # 卸载/覆盖安装时旧进程可能没被干净杀掉，cwd 还可能已经跟着旧目录一起被删。
+    # 只要占用者确实是 node + index.js（本应用），就直接结束它再启动；否则才报冲突。
+    local holder
+    holder="$(port_pid "$PORT")"
+    if [ -n "$holder" ] && proc_is_legacy_app "$holder"; then
+      log_msg "端口 ${PORT} 被旧实例占用 (pid=${holder})，正在结束它"
+      kill -TERM "$holder" 2>/dev/null || true
+      local w=0
+      while pid_alive "$holder" && [ "$w" -lt 10 ]; do
+        sleep 1
+        w=$((w + 1))
+      done
+      pid_alive "$holder" && kill -KILL "$holder" 2>/dev/null || true
+      sleep 1
+    fi
+    if port_in_use "$PORT"; then
+      fail "端口 ${PORT} 已被占用，请到应用设置或 etc/app.env 中修改端口后重试"
+    fi
+  fi
+
+  mkdir -p "$VAR_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+
+  if [ -f "$LOG_FILE" ]; then
+    local size
+    size="$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)"
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -gt "$MAX_LOG_SIZE" ] && mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+  fi
+
+  log_msg "Starting ${APP_NAME} on 0.0.0.0:${PORT} (data: ${DATA_DIR})"
+  (
+    cd "$APP_DIR" || exit 1
+    export NODE_ENV=production
+    export BIND_IP=0.0.0.0
+    export PORT="$PORT"
+    export DATA_PATH="$DATA_DIR"
+    export LOG_PATH="$LOG_DIR"
+    exec nohup "$NODE_BIN" index.js >> "$LOG_FILE" 2>&1
+  ) &
+  echo "$!" > "$PID_FILE"
+
+  local i=0
+  local miss=0
+  while [ "$i" -lt "$READY_TIMEOUT" ]; do
+    if port_in_use "$PORT"; then
+      log_msg "Ready: listening on port ${PORT}"
+      start_gateway "$PORT"
+      return 0
+    fi
+    if status_app; then
+      miss=0
+    else
+      # 刚 fork 出来、还没 exec 到 node 的瞬间，/proc/<pid>/cmdline 仍是 shell，
+      # proc_is_app 会误判为「进程不存在」。连续 5 秒都判定不到才算真的挂了。
+      miss=$((miss + 1))
+      [ "$miss" -ge 5 ] && break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+
+  if status_app || port_in_use "$PORT"; then
+    log_msg "start pending: process alive but port ${PORT} not listening yet"
+    start_gateway "$PORT"
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  fail "服务启动失败，请查看日志：${LOG_FILE}"
+}
+
+stop_app() {
+  log_msg "Stopping ${APP_NAME}..."
+  stop_gateway
+  local pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+  fi
+  if [ -z "$pid" ] || ! pid_alive "$pid"; then
+    # pid 文件丢失时按目录反查，防止旧实例残留占着端口导致下次启动失败
+    pid="$(find_app_pid)" || true
+  fi
+  if [ -z "$pid" ] || ! pid_alive "$pid"; then
+    # 目录已被卸载删除时再按端口兜底，只认本应用的 node + index.js
+    local port holder
+    port="$(load_port)"
+    holder="$(port_pid "$port")"
+    if [ -n "$holder" ] && proc_is_legacy_app "$holder"; then
+      pid="$holder"
+    fi
+  fi
+  if [ -z "$pid" ] || ! pid_alive "$pid"; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  local n=0
+  while pid_alive "$pid" && [ "$n" -lt 20 ]; do
+    sleep 1
+    n=$((n + 1))
+  done
+  if pid_alive "$pid"; then
+    log_msg "TERM 超时，强制结束 pid=${pid}"
+    kill -KILL "$pid" 2>/dev/null || true
+    pkill -KILL -f "${APP_DIR}/node/bin/node" 2>/dev/null || true
+    sleep 1
+  fi
+  rm -f "$PID_FILE"
+  return 0
+}
+
+case "${1:-}" in
+  start) start_app ;;
+  stop) stop_app ;;
+  status)
+    status_app && exit 0
+    exit 3
+    ;;
+  *)
+    echo "Usage: $0 start|stop|status" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    exit 1
+    ;;
+esac

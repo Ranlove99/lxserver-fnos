@@ -1,0 +1,6 @@
+#!/bin/bash
+# 升级前：停止旧版本
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${SCRIPT_DIR}/main" stop
+exit 0

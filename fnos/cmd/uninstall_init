@@ -1,0 +1,6 @@
+#!/bin/bash
+# 卸载前：停止服务
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${SCRIPT_DIR}/main" stop
+exit 0

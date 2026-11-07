@@ -1,0 +1,42 @@
+[
+    {
+        "comment": "=== 欢迎标语 ===",
+        "id": "welcome_slogan_v1",
+        "status": "active",
+        "type": "broadcast",
+        "logic": {
+            "interval_hours": -1
+        },
+        "ui": {
+            "title": "🎉 欢迎使用lxserver",
+            "message": "在这个纯净的音乐世界里，每一秒都是享受。\n祝您听歌愉快！",
+            "confirm_text": "开始探索",
+            "cancel_text": ""
+        },
+        "action": {
+            "type": "close"
+        }
+    },
+    {
+        "comment": "=== 版本更新 v2.1.4 ===",
+        "id": "update_v2_1_4",
+        "status": "active",
+        "type": "version",
+        "logic": {
+            "target_version": "v2.1.4",
+            "operator": "<",
+            "interval_hours": 24
+        },
+        "ui": {
+            "title": "发现新版本 v2.1.4",
+            "date": "2026-10-25",
+            "message": "本次更新带来多项重磅视觉革新、连接监控与系统级体验跃升：\n1. [新增] 播放页动态特效与背景自适应: 背景与 12 种粒子特效彻底解耦组合，明暗主题深度自适应，支持同源引擎轻量化复用与自动休眠。\n2. [新增] 用户在线状态指示与禁用功能: 用户列表前置 WebSocket 实时连接指示圆点（🟢在线/🔴离线），新增「禁用用户」开关并在全链路安全拦截登录。\n3. [新增] 本地音乐智能检测与多平台匹配: 优先提取声学指纹比对，支持多平台智能匹配，新增并发线程配置与本地持久化。\n4. [新增] 侧边栏折叠手柄与 Alt+B 快捷键: 极简半透明折叠控制手柄，支持一键沉浸浏览，全局快捷键与设置开关实时联动。\n5. [新增] 自定义目录侧边面板与树形层级: 沉浸式侧边目录分类树，支持多选快捷开关与歌曲数量角标，弹窗与侧边栏体验统一。\n6. [新增] Subsonic 配置独立管理页: 与主配置完全解耦，支持独立端口监听（4050），统一流媒体播放与下载缓存机制。\n7. [新增] Web 播放器无线投放与 VU 表头: 接入原生 AirPlay 与 Chromecast 投放，新增双通道动圈 VU 表头与真实 Git 构建指纹。\n8. [新增] 自定义音源在线一键自动更新: 提示栏拆分为「更新」与「前往」，支持在当前页一键拉取最新自定义音源并重载。\n9. [重构] 文件管理器全面升级 VueFinder: 彻底淘汰陈旧 jQuery / elFinder，基于 Vue 3 + VueFinder 4.7.6 构建轻量自包含静态资源。",
+            "confirm_text": "查看日志",
+            "cancel_text": "稍后提醒"
+        },
+        "action": {
+            "type": "link",
+            "url": "https://github.com/XCQ0607/lxserver/releases/tag/v2.1.4"
+        }
+    }
+]

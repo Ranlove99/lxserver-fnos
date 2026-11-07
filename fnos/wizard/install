@@ -1,0 +1,60 @@
+[
+  {
+    "stepTitle": "使用模式",
+    "items": [
+      {
+        "type": "switch",
+        "field": "wizard_single_user",
+        "label": "单用户模式（推荐）",
+        "initValue": "true"
+      },
+      {
+        "type": "tips",
+        "helpText": "<p><b>开启（单用户）</b>：打开即用、无需登录，界面隐藏「登录」和「数据同步」入口，适合自己一个人用 NAS 听歌。</p><p><b>关闭（多用户）</b>：需要账号密码，洛雪音乐客户端可把歌单同步到 NAS，网页端显示登录与数据同步。</p>"
+      }
+    ]
+  },
+  {
+    "stepTitle": "服务与账号",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_server_name",
+        "label": "服务名称（客户端里显示的名字）",
+        "initValue": "洛雪音乐",
+        "rules": [
+          { "required": true, "message": "请填写服务名称" }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_port",
+        "label": "服务端口",
+        "initValue": "9527",
+        "rules": [
+          { "required": true, "pattern": "^[0-9]{2,5}$", "message": "请填写 2-5 位数字端口" }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "<p>下面两项<b>仅在多用户模式需要</b>；单用户模式可以留空，系统会自动生成占位账号，登录入口不会显示。</p>"
+      },
+      {
+        "type": "text",
+        "field": "wizard_username",
+        "label": "用户名（多用户模式）",
+        "initValue": "admin"
+      },
+      {
+        "type": "password",
+        "field": "wizard_password",
+        "label": "密码（多用户模式，至少 6 位）",
+        "initValue": ""
+      },
+      {
+        "type": "tips",
+        "helpText": "<p>装完打开应用卡片即可使用；缓存与下载目录可在播放器「设置 → 缓存歌曲位置」里直接填绝对路径。</p>"
+      }
+    ]
+  }
+]

@@ -1,0 +1,7 @@
+#!/bin/bash
+# 卸载后：应用文件已删除，仅做 shell 兜底。
+# 数据（var/data）与配置由 fnOS 保留，便于重装恢复；此处不删除。
+set -u
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/lxserver/var}"
+rm -f "${VAR_DIR}/app.pid" 2>/dev/null || true
+exit 0

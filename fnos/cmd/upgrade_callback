@@ -1,0 +1,67 @@
+#!/bin/bash
+# 升级后：重建缓存链接、重新应用入口端口并启动（var 数据、data/config.js 均保留）
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="${TRIM_APPDEST:-/var/apps/lxserver/target}"
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/lxserver/var}"
+ETC_DIR="${TRIM_PKGETC:-/var/apps/lxserver/etc}"
+
+PORT=9527
+if [ -f "${ETC_DIR}/app.env" ]; then
+  P="$(sed -n 's/^PORT=//p' "${ETC_DIR}/app.env" | head -n 1 | tr -d ' \t\r\n')"
+  case "$P" in ''|*[!0-9]*) ;; *) PORT="$P" ;; esac
+fi
+if [ -f "${APP_DIR}/ui/config" ]; then
+  sed -i "s/__PORT__/${PORT}/g" "${APP_DIR}/ui/config" 2>/dev/null || true
+fi
+# 同步 manifest 的 service_port（升级会带入新的 manifest 文件）
+MANIFEST_FILE="$(dirname "${APP_DIR}")/manifest"
+if [ -f "$MANIFEST_FILE" ]; then
+  sed -i "s/^service_port=.*/service_port=${PORT}/" "$MANIFEST_FILE" 2>/dev/null || true
+fi
+
+# 升级会替换 target，缓存软链接需重建
+mkdir -p "${VAR_DIR}/storage/cache" "${VAR_DIR}/storage/music" 2>/dev/null || true
+for d in cache music; do
+  [ -L "${APP_DIR}/${d}" ] && continue
+  rm -rf "${APP_DIR:?}/${d}" 2>/dev/null || true
+  ln -sfn "${VAR_DIR}/storage/${d}" "${APP_DIR}/${d}" 2>/dev/null || true
+done
+
+# 升级：按本次升级的向导选择（缺省单用户，与安装默认一致）重新对齐用户模式。
+# 旧版本配置里 ui.singleUser 可能已经存在且为 false，仅靠 grep 判断会导致
+# 「选了单用户却仍要求登录」，因此这里改为无条件校正并备份原配置。
+CFG_FILE="${VAR_DIR}/data/config.js"
+if [ -f "$CFG_FILE" ]; then
+  SINGLE_USER=1
+  case "${wizard_single_user:-true}" in
+    false|False|FALSE|0|no|off) SINGLE_USER=0 ;;
+  esac
+  cp -f "$CFG_FILE" "${CFG_FILE}.bak-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  NODE_BIN="${APP_DIR}/node/bin/node"
+  [ -x "$NODE_BIN" ] || NODE_BIN="$(command -v node || true)"
+  [ -n "$NODE_BIN" ] && "$NODE_BIN" - "$CFG_FILE" "$SINGLE_USER" <<'NODEJS' || true
+const fs = require('fs')
+const [file, singleArg] = process.argv.slice(2)
+const singleUser = String(singleArg) === '1'
+let s = fs.readFileSync(file, 'utf8')
+
+const setBool = (key, val) => {
+  const re = new RegExp(`("${key.replace(/\./g, '\\.')}"\\s*:\\s*)(true|false)`)
+  if (re.test(s)) s = s.replace(re, (_m, p1) => `${p1}${val}`)
+  else s = s.replace(/(module\.exports\s*=\s*\{)/, (_m, p1) => `${p1}\n  "${key}": ${val},`)
+}
+
+setBool('ui.singleUser', singleUser)
+if (singleUser) {
+  setBool('user.enablePublicRestriction', false)
+  setBool('player.enableAuth', false)
+} else {
+  // 从单用户切回多用户时恢复公开访问限制，避免所有人都是管理员
+  setBool('user.enablePublicRestriction', true)
+}
+fs.writeFileSync(file, s, { mode: 0o644 })
+NODEJS
+fi
+
+"${SCRIPT_DIR}/main" start

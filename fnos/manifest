@@ -1,0 +1,16 @@
+appname=lxserver
+version=2.1.9
+display_name=洛雪音乐
+desc=LX Music 数据同步服务端 + 网页播放器。打开应用即可在浏览器里搜索、播放、下载音乐；桌面端/手机端洛雪音乐可把歌单、收藏同步到 NAS。内置 Node.js 22 运行时，离线可用。服务端口 <b>9527</b>：网页播放器为 <b>/</b>，客户端同步地址为 <b>/用户名</b>。
+source=thirdparty
+platform=__PLATFORM__
+maintainer=fnOS packaged by WorkBuddy
+maintainer_url=https://github.com/XCQ0607/lxserver
+os_min_version=1.1.3100
+service_port=9527
+checkport=true
+ctl_stop=true
+disable_authorization_path=true
+desktop_uidir=ui
+desktop_applaunchname=lxserver.main
+changelog=手机端界面优化：歌曲列表新增歌手与专辑信息（不再被音质标签挤成一个字）；修复播放页底部控制区与导航栏重叠、按钮点错位的问题。

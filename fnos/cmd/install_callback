@@ -1,0 +1,175 @@
+#!/bin/bash
+# ============================================================
+# 安装后初始化：校验包完整性 → 生成配置 → 启动服务
+# 应用文件已解压到 TRIM_APPDEST
+# ============================================================
+set -u
+
+APP_NAME="lxserver"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="${TRIM_APPDEST:-/var/apps/${APP_NAME}/target}"
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/${APP_NAME}/var}"
+ETC_DIR="${TRIM_PKGETC:-/var/apps/${APP_NAME}/etc}"
+DATA_DIR="${VAR_DIR}/data"
+NODE_BIN="${APP_DIR}/node/bin/node"
+
+fail() {
+  echo "$1" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+  exit 1
+}
+
+# 1) 包完整性
+[ -x "$NODE_BIN" ] || fail "安装包不完整：内置 Node 运行时缺失"
+[ -f "${APP_DIR}/index.js" ] || fail "安装包不完整：index.js 缺失"
+[ -d "${APP_DIR}/server" ] || fail "安装包不完整：server/ 缺失"
+[ -d "${APP_DIR}/public/music" ] || fail "安装包不完整：public/music 缺失"
+[ -d "${APP_DIR}/node_modules/sharp" ] || fail "安装包不完整：node_modules 缺失"
+
+( cd "$APP_DIR" && "$NODE_BIN" -e "require('sharp');require('music-tag-native');require('ws')" ) >/dev/null 2>&1 \
+  || fail "内置原生依赖加载失败，安装包与设备架构可能不匹配"
+
+mkdir -p "$VAR_DIR" "$DATA_DIR" "${VAR_DIR}/logs" "$ETC_DIR" || fail "创建应用数据目录失败"
+
+# 2) 端口落盘
+PORT="${wizard_port:-9527}"
+case "$PORT" in
+  ''|*[!0-9]*) PORT=9527 ;;
+esac
+printf 'PORT=%s\n' "$PORT" > "${ETC_DIR}/app.env" || fail "写入端口配置失败"
+
+# 3) 桌面入口端口（应用卡片按此端口打开网页）
+if [ -f "${APP_DIR}/ui/config" ]; then
+  sed -i "s/__PORT__/${PORT}/g" "${APP_DIR}/ui/config" 2>/dev/null || true
+fi
+
+# 3.1) 同步已安装 manifest 的 service_port
+#     manifest 里写死 9527，而向导允许改端口；不同步会导致应用中心显示的端口
+#     与实际监听端口不一致。这里尽力修正，失败不影响安装。
+MANIFEST_FILE="$(dirname "${APP_DIR}")/manifest"
+if [ -f "$MANIFEST_FILE" ]; then
+  sed -i "s/^service_port=.*/service_port=${PORT}/" "$MANIFEST_FILE" 2>/dev/null || true
+fi
+
+# 4) 缓存/下载目录重定向到 var
+#    项目默认把 cache/ 与 music/ 建在进程工作目录（target 只读且在升级时被替换），
+#    这里预建到数据卷并做软链接，保证可写、可持久化
+mkdir -p "${VAR_DIR}/storage/cache" "${VAR_DIR}/storage/music" 2>/dev/null || true
+for d in cache music; do
+  [ -L "${APP_DIR}/${d}" ] && continue
+  rm -rf "${APP_DIR:?}/${d}" 2>/dev/null || true
+  if ! ln -sfn "${VAR_DIR}/storage/${d}" "${APP_DIR}/${d}" 2>/dev/null; then
+    mkdir -p "${APP_DIR}/${d}" 2>/dev/null || true
+    chmod 777 "${APP_DIR}/${d}" 2>/dev/null || true
+  fi
+done
+
+# 5) 生成运行配置（仅首次；升级/重装保留用户已有配置）
+USER_NAME="${wizard_username:-admin}"
+USER_PASS="${wizard_password:-}"
+SERVER_NAME="${wizard_server_name:-洛雪音乐}"
+
+# 使用模式：单用户（默认，免登录） / 多用户（账号 + 数据同步）
+SINGLE_USER=1
+case "${wizard_single_user:-true}" in
+  false|False|FALSE|0|no|off) SINGLE_USER=0 ;;
+esac
+if [ "$SINGLE_USER" = "1" ]; then
+  # 单用户模式下密码不参与登录，仅作为 accounts 占位，随机生成避免空口令
+  [ -n "$USER_PASS" ] || USER_PASS="$(head -c 24 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-16)"
+else
+  [ -n "$USER_PASS" ] || fail "多用户模式需要设置访问密码，请返回上一步填写后重试"
+fi
+
+if [ ! -f "${DATA_DIR}/config.js" ]; then
+  "$NODE_BIN" - "${APP_DIR}/config.js" "${DATA_DIR}/config.js" \
+    "$USER_NAME" "$USER_PASS" "$PORT" "$SERVER_NAME" "$SINGLE_USER" <<'NODEJS' || fail "生成配置文件失败"
+const fs = require('fs')
+const [src, dst, user, pass, port, serverName, singleArg] = process.argv.slice(2)
+const singleUser = String(singleArg) === '1'
+let s = fs.readFileSync(src, 'utf8')
+
+const before = s
+s = s.replace(/"users":\s*\[[\s\S]*?\n  \],/,
+  `"users": [
+    {
+      "name": ${JSON.stringify(user)},
+      "password": ${JSON.stringify(pass)}
+    }
+  ],`)
+if (s === before) { console.error('users 段替换失败'); process.exit(1) }
+
+s = s.replace(/"disableTelemetry":\s*(true|false)/, '"disableTelemetry": true')
+s = s.replace(/"serverName":\s*"[^"]*"/, `"serverName": ${JSON.stringify(serverName)}`)
+s = s.replace(/"port":\s*\d+/, `"port": ${Number(port)}`)
+s = s.replace(/"admin\.password":\s*"[^"]*"/, `"admin.password": ${JSON.stringify(pass)}`)
+
+// 单用户模式：免登录、关闭公开访问限制，隐藏登录与同步入口
+const applyToggle = (key, value) => {
+  const re = new RegExp(`"${key.replace(/\./g, '\\.')}":\\s*(true|false)`)
+  if (re.test(s)) s = s.replace(re, `"${key}": ${value}`)
+  else s = s.replace(/(module\.exports\s*=\s*\{)/, `$1\n  "${key}": ${value},`)
+}
+applyToggle('ui.singleUser', singleUser)
+if (singleUser) {
+  applyToggle('user.enablePublicRestriction', false)
+  applyToggle('player.enableAuth', false)
+}
+
+fs.writeFileSync(dst, s, { mode: 0o644 })
+NODEJS
+  [ -f "${DATA_DIR}/config.js" ] || fail "配置文件未生成"
+else
+  # 覆盖安装/重装：配置文件已存在时不能整份重写（会丢用户自定义项），
+  # 只按本次向导选择就地更新账号、端口与单用户开关。
+  cp -f "${DATA_DIR}/config.js" "${DATA_DIR}/config.js.bak-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  "$NODE_BIN" - "${DATA_DIR}/config.js" \
+    "$USER_NAME" "$USER_PASS" "$PORT" "$SERVER_NAME" "$SINGLE_USER" <<'NODEJS' || true
+const fs = require('fs')
+const [file, user, pass, port, serverName, singleArg] = process.argv.slice(2)
+const singleUser = String(singleArg) === '1'
+let s = fs.readFileSync(file, 'utf8')
+
+const setStr = (key, val) => {
+  const re = new RegExp(`("${key.replace(/\./g, '\\.')}"\\s*:\\s*)"[^"]*"`)
+  if (re.test(s)) s = s.replace(re, (_m, p1) => `${p1}${JSON.stringify(val)}`)
+}
+const setNum = (key, val) => {
+  const re = new RegExp(`("${key.replace(/\./g, '\\.')}"\\s*:\\s*)\\d+`)
+  if (re.test(s)) s = s.replace(re, (_m, p1) => `${p1}${Number(val)}`)
+}
+const setBool = (key, val) => {
+  const re = new RegExp(`("${key.replace(/\./g, '\\.')}"\\s*:\\s*)(true|false)`)
+  if (re.test(s)) s = s.replace(re, (_m, p1) => `${p1}${val}`)
+  else s = s.replace(/(module\.exports\s*=\s*\{)/, (_m, p1) => `${p1}\n  "${key}": ${val},`)
+}
+
+const usersRe = /"users"\s*:\s*\[[\s\S]*?\n  \],/
+if (usersRe.test(s)) {
+  s = s.replace(usersRe, `"users": [
+    {
+      "name": ${JSON.stringify(user)},
+      "password": ${JSON.stringify(pass)}
+    }
+  ],`)
+}
+setStr('serverName', serverName)
+setNum('port', port)
+setStr('admin.password', pass)
+setBool('ui.singleUser', singleUser)
+if (singleUser) {
+  setBool('user.enablePublicRestriction', false)
+  setBool('player.enableAuth', false)
+} else {
+  // 多用户模式：恢复公开访问限制，敏感操作仍需管理员登录
+  setBool('user.enablePublicRestriction', true)
+}
+
+fs.writeFileSync(file, s, { mode: 0o644 })
+NODEJS
+fi
+
+# 6) 清掉上一次安装残留的网关 socket（升级/重装后可能残留）
+rm -f "${APP_DIR}/app.sock" 2>/dev/null || true
+
+# 7) 启动（幂等）
+"${SCRIPT_DIR}/main" start

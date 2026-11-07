@@ -1,0 +1,15 @@
+{
+  ".url": {
+    "lxserver.main": {
+      "title": "洛雪音乐",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "port": "",
+      "gatewayPrefix": "/app/lxserver",
+      "gatewaySocket": "app.sock",
+      "url": "/app/lxserver",
+      "allUsers": false
+    }
+  }
+}

@@ -1,0 +1,29 @@
+#!/bin/bash
+# ============================================================
+# 安装前检查（应用文件尚未解压，只能检查与包内容无关的条件）
+# ============================================================
+set -u
+
+APP_NAME="lxserver"
+
+fail() {
+  echo "$1" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+  exit 1
+}
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+__ARCH_CASE__
+esac
+
+PORT="${wizard_port:-9527}"
+case "$PORT" in
+  ''|*[!0-9]*) fail "端口配置无效：${PORT}" ;;
+esac
+
+if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+  exec 3>&- 2>/dev/null || true
+  fail "端口 ${PORT} 已被其他程序占用，请返回上一步换一个端口（如 9528）后重试。"
+fi
+
+exit 0
